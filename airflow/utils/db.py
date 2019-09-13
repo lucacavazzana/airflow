@@ -202,6 +202,10 @@ def initdb():
             host='yarn', extra='{"queue": "root.default"}'))
     merge_conn(
         Connection(
+            conn_id='livy_default', conn_type='livy',
+            host='livy', port=8998))
+    merge_conn(
+        Connection(
             conn_id='druid_broker_default', conn_type='druid',
             host='druid-broker', port=8082, extra='{"endpoint": "druid/v2/sql"}'))
     merge_conn(
