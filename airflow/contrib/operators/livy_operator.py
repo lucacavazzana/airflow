@@ -21,53 +21,56 @@
 This module contains the Apache Livy operator.
 """
 
-from time import sleep, gmtime, mktime
+from time import sleep
 
+from airflow.contrib.hooks.livy_hook import BatchState, LivyHook
+from airflow.exceptions import AirflowException
 from airflow.models import BaseOperator
 from airflow.utils.decorators import apply_defaults
-from airflow.exceptions import AirflowException
-from airflow.contrib.hooks.livy_hook import LivyHook, BatchState, TERMINAL_STATES
 
 
 class LivyOperator(BaseOperator):
     """
-    :param file: Path of the  file containing the application to execute (required).
+    This operator wraps the Apache Livy batch REST API, allowing to submit a Spark
+    application to the underlying cluster.
+
+    :param file: path of the file containing the application to execute (required).
     :type file: str
-    :param class_name: Application Java/Spark main class string.
+    :param class_name: name of the application Java/Spark main class.
     :type class_name: str
-    :param args: Command line arguments for the application s.
+    :param args: application command line arguments.
     :type args: list
     :param jars: jars to be used in this sessions.
     :type jars: list
-    :param py_files: Python files to be used in this session.
+    :param py_files: python files to be used in this session.
     :type py_files: list
     :param files: files to be used in this session.
     :type files: list
-    :param driver_memory: Amount of memory to use for the driver process  string.
+    :param driver_memory: amount of memory to use for the driver process.
     :type driver_memory: str
-    :param driver_cores: Number of cores to use for the driver process int.
+    :param driver_cores: number of cores to use for the driver process.
     :type driver_cores: str
-    :param executor_memory: Amount of memory to use per executor process  string.
+    :param executor_memory: amount of memory to use per executor process.
     :type executor_memory: str
-    :param executor_cores: Number of cores to use for each executor  int.
+    :param executor_cores: number of cores to use for each executor.
     :type executor_cores: str
-    :param num_executors: Number of executors to launch for this session  int.
+    :param num_executors: number of executors to launch for this session.
     :type num_executors: str
-    :param archives: Archives to be used in this session.
+    :param archives: archives to be used in this session.
     :type archives: list
-    :param queue: The name of the YARN queue to which submitted string.
+    :param queue: name of the YARN queue to which the application is submitted.
     :type queue: str
-    :param name: The name of this session  string.
+    :param name: name of this session.
     :type name: str
     :param conf: Spark configuration properties.
     :type conf: dict
-    :param proxy_user: User to impersonate when running the job.
+    :param proxy_user: user to impersonate when running the job.
     :type proxy_user: str
     :param livy_conn_id: reference to a pre-defined Livy Connection.
     :type livy_conn_id: str
     :param polling_interval: time in seconds between polling for job completion. Don't poll for values >=0
     :type polling_interval: int
-    :param timeout: for a value greater than zero, number of seconds to poll before killing the batch.
+    :param timeout: when greater than zero, seconds to wait for a terminal state before killing the batch.
     :type timeout: int
     """
 
@@ -75,60 +78,71 @@ class LivyOperator(BaseOperator):
     def __init__(
         self,
         file=None,
+        class_name=None,
         args=None,
         conf=None,
+        jars=None,
+        py_files=None,
+        files=None,
+        driver_memory=None,
+        driver_cores=None,
+        executor_memory=None,
+        executor_cores=None,
+        num_executors=None,
+        archives=None,
+        queue=None,
+        name=None,
+        proxy_user=None,
         livy_conn_id='livy_default',
         polling_interval=0,
-        timeout=24 * 3600,
-        *vargs,
         **kwargs
     ):
-        super(LivyOperator, self).__init__(*vargs, **kwargs)
+        # pylint: disable-msg=too-many-arguments
+
+        super(LivyOperator, self).__init__(**kwargs)
 
         self._spark_params = {
             'file': file,
+            'class_name': class_name,
             'args': args,
+            'jars': jars,
+            'py_files': py_files,
+            'files': files,
+            'driver_memory': driver_memory,
+            'driver_cores': driver_cores,
+            'executor_memory': executor_memory,
+            'executor_cores': executor_cores,
+            'num_executors': num_executors,
+            'archives': archives,
+            'queue': queue,
+            'name': name,
             'conf': conf,
+            'proxy_user': proxy_user
         }
-
-        self._spark_params['proxy_user'] = kwargs.get('proxy_user')
-        self._spark_params['class_name'] = kwargs.get('class_name')
-        self._spark_params['jars'] = kwargs.get('jars')
-        self._spark_params['py_files'] = kwargs.get('py_files')
-        self._spark_params['files'] = kwargs.get('files')
-        self._spark_params['driver_memory'] = kwargs.get('driver_memory')
-        self._spark_params['driver_cores'] = kwargs.get('driver_cores')
-        self._spark_params['executor_memory'] = kwargs.get('executor_memory')
-        self._spark_params['executor_cores'] = kwargs.get('executor_cores')
-        self._spark_params['num_executors'] = kwargs.get('num_executors')
-        self._spark_params['archives'] = kwargs.get('archives')
-        self._spark_params['queue'] = kwargs.get('queue')
-        self._spark_params['name'] = kwargs.get('name')
 
         self._livy_conn_id = livy_conn_id
         self._polling_interval = polling_interval
-        self._timeout = timeout
 
         self._livy_hook = None
         self._batch_id = None
-        self._start_ts = None
 
-    def _init_hook(self):
-        if self._livy_conn_id:
-            if self._livy_hook and isinstance(self._livy_hook, LivyHook):
-                self.log.info("livy_conn_id is ignored when Livy hook is already provided")
-            else:
-                self._livy_hook = LivyHook(livy_conn_id=self._livy_conn_id)
+    def get_hook(self):
+        """
+        Get valid hook.
 
-        if not self._livy_hook:
-            raise AirflowException("Unable to create LivyHook")
+        :return: hook
+        :rtype: LivyHook
+        """
+        if self._livy_hook and isinstance(self._livy_hook, LivyHook):
+            self.log.info("livy_conn_id is ignored when Livy hook is already provided")
+            return self._livy_hook
+
+        return LivyHook(livy_conn_id=self._livy_conn_id)
 
     def execute(self, context):
-        self._init_hook()
+        self._livy_hook = self.get_hook()
 
         self._batch_id = self._livy_hook.post_batch(**self._spark_params)
-
-        self._start_ts = LivyOperator.get_ts()
 
         if self._polling_interval > 0:
             self.poll_for_termination(self._batch_id)
@@ -143,14 +157,8 @@ class LivyOperator(BaseOperator):
         :type batch_id: int
         """
         state = self._livy_hook.get_batch_state(batch_id)
-        while state not in TERMINAL_STATES:
+        while state not in self._livy_hook.TERMINAL_STATES:
             self.log.debug('Batch with id %s is in state: %s', batch_id, state.value)
-            if self._timeout > 0 and LivyOperator.get_ts() - self._start_ts > self._timeout:
-                # timeout enabled and expired
-                self.log.warning("Batch %s execution exceeded timeout. Last known state: %s",
-                                 batch_id, state.value)
-                self.kill()
-                raise AirflowException("Batch timeout reached")
             sleep(self._polling_interval)
             state = self._livy_hook.get_batch_state(batch_id)
         self.log.info("Batch with id %s terminated with state: %s", batch_id, state.value)
@@ -166,10 +174,3 @@ class LivyOperator(BaseOperator):
         """
         if self._batch_id is not None:
             self._livy_hook.delete_batch(self._batch_id)
-
-    @staticmethod
-    def get_ts():
-        """
-        Get current time.
-        """
-        return mktime(gmtime())

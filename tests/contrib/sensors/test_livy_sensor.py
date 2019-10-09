@@ -22,12 +22,10 @@ import unittest
 from unittest.mock import patch
 
 from airflow import DAG
+from airflow.contrib.hooks.livy_hook import BatchState, LivyHook
 from airflow.contrib.sensors.livy_sensor import LivySensor
-from airflow.contrib.hooks.livy_hook import BatchState, TERMINAL_STATES
 from airflow.models import Connection
-from airflow.utils import db
-from airflow.utils import timezone
-
+from airflow.utils import db, timezone
 
 DEFAULT_DATE = timezone.datetime(2017, 1, 1)
 
@@ -57,7 +55,7 @@ class TestLivySensor(unittest.TestCase):
         for state in BatchState:
             with self.subTest(state.value):
                 mock_state.return_value = state
-                self.assertEqual(sensor.poke({}), state in TERMINAL_STATES)
+                self.assertEqual(sensor.poke({}), state in LivyHook.TERMINAL_STATES)
 
 
 if __name__ == '__main__':

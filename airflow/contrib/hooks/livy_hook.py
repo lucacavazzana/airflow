@@ -21,13 +21,12 @@
 This module contains the Apache Livy hook.
 """
 
+import json
 import re
 from enum import Enum
-import json
-import requests
 
 from airflow.exceptions import AirflowException
-from airflow.hooks.base_hook import BaseHook
+from airflow.hooks.http_hook import HttpHook
 from airflow.utils.log.logging_mixin import LoggingMixin
 
 
@@ -47,66 +46,98 @@ class BatchState(Enum):
     SUCCESS = 'success'
 
 
-TERMINAL_STATES = {
-    BatchState.SUCCESS,
-    BatchState.DEAD,
-    BatchState.KILLED,
-    BatchState.ERROR,
-}
-
-
-class LivyHook(BaseHook, LoggingMixin):
+class LivyHook(HttpHook, LoggingMixin):
     """
     Hook for Apache Livy through the REST API.
 
-    For more information about the API refer to
-    https://livy.apache.org/docs/latest/rest-api.html
-
     :param livy_conn_id: reference to a pre-defined Livy Connection.
     :type livy_conn_id: str
+
+    .. seealso::
+        For more details refer to the Apache Livy API reference:
+        https://livy.apache.org/docs/latest/rest-api.html
     """
+
+    TERMINAL_STATES = {
+        BatchState.SUCCESS,
+        BatchState.DEAD,
+        BatchState.KILLED,
+        BatchState.ERROR,
+    }
+
+    _def_headers = {
+        'Content-Type': 'application/json',
+        'Accept': 'application/json'
+    }
+
     def __init__(self, livy_conn_id='livy_default'):
-        super(LivyHook, self).__init__(livy_conn_id)
-        self._livy_conn_id = livy_conn_id
-        self._build_base_url()
+        super(LivyHook, self).__init__(http_conn_id=livy_conn_id)
 
-    def _build_base_url(self):
+    def get_conn(self, headers=None):
         """
-        Build connection URL
+        Returns http session for use with requests
+
+        :param headers: additional headers to be passed through as a dictionary
+        :type headers: dict
+        :return: requests session
+        :rtype: requests.Session
         """
-        params = self.get_connection(self._livy_conn_id)
+        tmp_headers = self._def_headers.copy()  # setting default headers
+        if headers:
+            tmp_headers.update(headers)
+        return super(LivyHook, self).get_conn(tmp_headers)
 
-        base_url = params.host
+    def run_method(self, method='GET', endpoint=None, data=None, headers=None, extra_options=None):
+        """
+        Wrapper for HttpHook, allows to change method on the same HttpHook
 
-        if not base_url:
-            raise AirflowException("Missing Livy endpoint hostname")
+        :param method: http method
+        :type method: str
+        :param endpoint: endpoint
+        :type endpoint: str
+        :param data: request payload
+        :type data: dict
+        :param headers: headers
+        :type headers: dict
+        :param extra_options: extra options
+        :type extra_options: dict
+        :return: http response
+        :rtype: requests.Response
+        """
+        if method not in ('GET', 'POST', 'PUT', 'DELETE', 'HEAD'):
+            raise AirflowException("Invalid http method '{}'".format(method))
 
-        if '://' not in base_url:
-            base_url = '{}://{}'.format('http', base_url)
-        if not re.search(r':\d+$', base_url):
-            base_url = '{}:{}'.format(base_url, str(params.port or 8998))
-
-        self._base_url = base_url
-
-    def get_conn(self):
-        pass
+        back_method = self.method
+        self.method = method
+        result = self.run(endpoint, data, headers, extra_options)
+        self.method = back_method
+        return result
 
     def post_batch(self, *args, **kwargs):
         """
         Perform request to submit batch
+
+        :return: batch session id
+        :rtype: int
         """
+        batch_submit_body = json.dumps(self.build_post_batch_body(*args, **kwargs))
 
-        batch_submit_body = json.dumps(LivyHook.build_post_batch_body(*args, **kwargs))
-        headers = {'Content-Type': 'application/json'}
+        if self.base_url is None:
+            # need to init self.base_url
+            self.get_conn()
+        self.log.info("Submitting job {} to {}".format(batch_submit_body, self.base_url))
 
-        self.log.info("Submitting job {} to {}".format(batch_submit_body, self._base_url))
-        response = requests.post(self._base_url + '/batches', data=batch_submit_body, headers=headers)
+        response = self.run_method(
+            method='POST',
+            endpoint='/batches',
+            data=batch_submit_body
+        )
         self.log.debug("Got response: {}".format(response.text))
 
         if response.status_code != 201:
             raise AirflowException("Could not submit batch. Status code: {}".format(response.status_code))
 
-        batch_id = LivyHook._parse_post_response(response.json())
+        batch_id = self._parse_post_response(response.json())
         if batch_id is None:
             raise AirflowException("Unable to parse a batch session id")
         self.log.info("Batch submitted with session id: {}".format(batch_id))
@@ -116,13 +147,16 @@ class LivyHook(BaseHook, LoggingMixin):
     def get_batch(self, session_id):
         """
         Fetch info about the specified batch
+
         :param session_id: identifier of the batch sessions
         :type session_id: int
+        :return: response body
+        :rtype: dict
         """
-        LivyHook._validate_session_id(session_id)
+        self._validate_session_id(session_id)
 
         self.log.debug("Fetching info for batch session {}".format(session_id))
-        response = requests.get('{}/batches/{}'.format(self._base_url, session_id))
+        response = self.run_method(endpoint='/batches/{}'.format(session_id))
 
         if response.status_code != 200:
             self.log.warning("Got status code {} for session {}".format(response.status_code, session_id))
@@ -133,13 +167,16 @@ class LivyHook(BaseHook, LoggingMixin):
     def get_batch_state(self, session_id):
         """
         Fetch the state of the specified batch
+
         :param session_id: identifier of the batch sessions
-        :type session_id: int
+        :type session_id: Union[int, str]
+        :return: batch state
+        :rtype: str
         """
-        LivyHook._validate_session_id(session_id)
+        self._validate_session_id(session_id)
 
         self.log.debug("Fetching info for batch session {}".format(session_id))
-        response = requests.get('{}/batches/{}/state'.format(self._base_url, session_id))
+        response = self.run_method(endpoint='/batches/{}/state'.format(session_id))
 
         if response.status_code != 200:
             self.log.warning("Got status code {} for session {}".format(response.status_code, session_id))
@@ -153,13 +190,19 @@ class LivyHook(BaseHook, LoggingMixin):
     def delete_batch(self, session_id):
         """
         Delete the specified batch
+
         :param session_id: identifier of the batch sessions
         :type session_id: int
+        :return: response body
+        :rtype: dict
         """
-        LivyHook._validate_session_id(session_id)
+        self._validate_session_id(session_id)
 
         self.log.info("Deleting batch session {}".format(session_id))
-        response = requests.delete('{}/batches/{}'.format(self._base_url, session_id))
+        response = self.run_method(
+            method='DELETE',
+            endpoint='/batches/{}'.format(session_id)
+        )
 
         if response.status_code != 200:
             self.log.warning("Got status code {} for session {}".format(response.status_code, session_id))
@@ -169,6 +212,12 @@ class LivyHook(BaseHook, LoggingMixin):
 
     @staticmethod
     def _validate_session_id(session_id):
+        """
+        Validate session id is a int
+
+        :param session_id: session id
+        :type session_id: Union[int, str]
+        """
         try:
             int(session_id)
         except (TypeError, ValueError):
@@ -176,20 +225,39 @@ class LivyHook(BaseHook, LoggingMixin):
 
     @staticmethod
     def _parse_post_response(response):
-        """Parse batch response for batch id"""
-        return response['id'] if 'id' in response else None
+        """
+        Parse batch response for batch id
+
+        :param response: response body
+        :type response: dict
+        :return: session id
+        :rtype: str
+        """
+        return response.get('id')
 
     @staticmethod
     def build_post_batch_body(
         file,
         args=None,
-        conf=None,
-        **kwargs
+        class_name=None,
+        jars=None,
+        py_files=None,
+        files=None,
+        archives=None,
+        name=None,
+        driver_memory=None,
+        driver_cores=None,
+        executor_memory=None,
+        executor_cores=None,
+        num_executors=None,
+        queue=None,
+        proxy_user=None,
+        conf=None
     ):
         """
         Build the post batch request body.
         For more information about the format refer to
-        See https://livy.apache.org/docs/latest/rest-api.html
+        .. seealso:: https://livy.apache.org/docs/latest/rest-api.html
 
         :param file: Path of the file containing the application to execute (required).
         :type file: str
@@ -223,22 +291,12 @@ class LivyHook(BaseHook, LoggingMixin):
         :type name: str
         :param conf: Spark configuration properties.
         :type conf: dict
+        :return: request body
+        :rtype: dict
         """
-        body = {'file': file}
+        # pylint: disable-msg=too-many-arguments
 
-        class_name = kwargs.get('class_name')
-        jars = kwargs.get('jars')
-        py_files = kwargs.get('py_files')
-        files = kwargs.get('files')
-        archives = kwargs.get('archives')
-        name = kwargs.get('name')
-        driver_memory = kwargs.get('driver_memory')
-        driver_cores = kwargs.get('driver_cores')
-        executor_memory = kwargs.get('executor_memory')
-        executor_cores = kwargs.get('executor_cores')
-        num_executors = kwargs.get('num_executors')
-        queue = kwargs.get('queue')
-        proxy_user = kwargs.get('proxy_user')
+        body = {'file': file}
 
         if proxy_user:
             body['proxyUser'] = proxy_user
@@ -275,20 +333,42 @@ class LivyHook(BaseHook, LoggingMixin):
 
     @staticmethod
     def _validate_size_format(size):
+        """
+        Validate size format.
+
+        :param size: size value
+        :type size: str
+        :return: true if valid format
+        :rtype: bool
+        """
         if size and not (isinstance(size, str) and re.match(r'\d+[kmgt]b?', size, re.IGNORECASE)):
             raise AirflowException("Invalid java size format for string'{}'".format(size))
         return True
 
     @staticmethod
     def _validate_list_of_stringables(vals):
-        """Check the value can be converted to strings"""
+        """
+        Check the values in the provided list can be converted to strings.
+
+        :param vals: list to validate
+        :type vals: list
+        :return: true if valid
+        :rtype: bool
+        """
         if vals and any(1 for val in vals if not isinstance(val, (str, int, float))):
             raise AirflowException("List of strings expected")
         return True
 
     @staticmethod
     def _validate_extra_conf(conf):
-        """Check configuration values are either strings or ints"""
+        """
+        Check configuration values are either strings or ints.
+
+        :param conf: configuration variable
+        :type conf: dict
+        :return: true if valid
+        :rtype: bool
+        """
         if conf:
             if not isinstance(conf, dict):
                 raise AirflowException("'conf' argument must be a dict")

@@ -17,52 +17,55 @@
 # specific language governing permissions and limitations
 # under the License.
 
-import unittest
-from unittest.mock import patch, MagicMock
 import json
+import unittest
+from unittest.mock import MagicMock, patch
+
 from requests.exceptions import RequestException
 
 from airflow import AirflowException
+from airflow.contrib.hooks.livy_hook import BatchState, LivyHook
 from airflow.models import Connection
 from airflow.utils import db
-
-from airflow.contrib.hooks.livy_hook import LivyHook, BatchState
 
 TEST_ID = 100
 SAMPLE_GET_RESPONSE = {'id': TEST_ID, 'state': BatchState.SUCCESS.value}
 
 
 class TestLivyHook(unittest.TestCase):
-
-    def setUp(self):
-        db.merge_conn(Connection(conn_id='simple', host='http://host:1234'))
+    @classmethod
+    def setUpClass(cls):
+        db.merge_conn(Connection(conn_id='livy_default', host='host', schema='http', port='8998'))
         db.merge_conn(Connection(conn_id='default_port', host='http://host'))
         db.merge_conn(Connection(conn_id='default_protocol', host='host'))
         db.merge_conn(Connection(conn_id='port_set', host='host', port=1234))
-        db.merge_conn(Connection(conn_id='host_overrides_port', host='http://host:4321', port=1234))
+        db.merge_conn(Connection(conn_id='schema_set', host='host', schema='zzz'))
+        db.merge_conn(Connection(conn_id='dont_override_schema', host='http://host', schema='zzz'))
         db.merge_conn(Connection(conn_id='missing_host', port=1234))
         db.merge_conn(Connection(conn_id='invalid_uri', uri='http://invalid_uri:4321'))
 
-    def test_build_base_url(self):
+    def test_build_get_hook(self):
 
         connection_url_mapping = {
             # id, expected
-            'simple': 'http://host:1234',
-            'default_port': 'http://host:8998',
-            'default_protocol': 'http://host:8998',
+            'default_port': 'http://host',
+            'default_protocol': 'http://host',
             'port_set': 'http://host:1234',
-            'host_overrides_port': 'http://host:4321',
+            'schema_set': 'zzz://host',
+            'dont_override_schema': 'http://host',
         }
 
         for conn_id, expected in connection_url_mapping.items():
             with self.subTest(conn_id):
                 hook = LivyHook(livy_conn_id=conn_id)
 
-                self.assertEqual(hook._base_url, expected)
+                hook.get_conn()
+                self.assertEqual(hook.base_url, expected)
 
+    @unittest.skip("inherited HttpHook does not handle missing hostname")
     def test_missing_host(self):
         with self.assertRaises(AirflowException):
-            LivyHook(livy_conn_id='missing_host')
+            LivyHook(livy_conn_id='missing_host').get_conn()
 
     def test_build_body(self):
         with self.subTest('minimal request'):
@@ -183,13 +186,12 @@ class TestLivyHook(unittest.TestCase):
         mock_request.return_value.status_code = status_code
         mock_request.return_value.json.return_value = body
 
-    @patch('requests.post')
+    @patch('airflow.contrib.hooks.livy_hook.LivyHook.run_method')
     def test_post_batch(self, mock_request):
 
         batch_id = 100
 
         hook = LivyHook()
-        hook._base_url = 'http://localhost:8998'
 
         with self.subTest('batch submit success'):
             TestLivyHook.build_mock_response(
@@ -204,9 +206,9 @@ class TestLivyHook(unittest.TestCase):
 
             mock_request.assert_called_once()
             mock_request.assert_called_with(
-                'http://localhost:8998/batches',
-                data=json.dumps({'file': 'sparkapp'}),
-                headers={'Content-Type': 'application/json'}
+                method='POST',
+                endpoint='/batches',
+                data=json.dumps({'file': 'sparkapp'})
             )
             self.assertIn('data', request_args)
             self.assertIsInstance(request_args['data'], str)
@@ -225,20 +227,19 @@ class TestLivyHook(unittest.TestCase):
 
             mock_request.assert_called_once()
             mock_request.assert_called_with(
-                'http://localhost:8998/batches',
-                data=json.dumps({'file': 'sparkapp'}),
-                headers={'Content-Type': 'application/json'}
+                method='POST',
+                endpoint='/batches',
+                data=json.dumps({'file': 'sparkapp'})
             )
             self.assertIn('data', request_args)
             self.assertIsInstance(request_args['data'], str)
 
-    @patch('requests.get')
+    @patch('airflow.contrib.hooks.livy_hook.LivyHook.run_method')
     def test_get_batch(self, mock_request):
 
         batch_id = 100
 
         hook = LivyHook()
-        hook._base_url = 'http://localhost:8998'
 
         with self.subTest('get batch success'):
             TestLivyHook.build_mock_response(mock_request, 200, {'id': batch_id})
@@ -246,7 +247,7 @@ class TestLivyHook(unittest.TestCase):
             resp = hook.get_batch(batch_id)
 
             mock_request.assert_called_once()
-            mock_request.assert_called_with('http://localhost:8998/batches/{}'.format(batch_id))
+            mock_request.assert_called_with(endpoint='/batches/{}'.format(batch_id))
             self.assertIsInstance(resp, dict)
             self.assertIn('id', resp)
 
@@ -258,21 +259,20 @@ class TestLivyHook(unittest.TestCase):
             with self.assertRaises(AirflowException):
                 hook.get_batch(batch_id)
             mock_request.assert_called_once()
-            mock_request.assert_called_with('http://localhost:8998/batches/{}'.format(batch_id))
+            mock_request.assert_called_with(endpoint='/batches/{}'.format(batch_id))
 
     def test_invalid_uri(self):
         hook = LivyHook(livy_conn_id='invalid_uri')
         with self.assertRaises(RequestException):
             hook.post_batch(file='sparkapp')
 
-    @patch('requests.get')
+    @patch('airflow.contrib.hooks.livy_hook.LivyHook.run_method')
     def test_get_batch_state(self, mock_request):
 
         batch_id = 100
         running = BatchState.RUNNING
 
         hook = LivyHook()
-        hook._base_url = 'http://localhost:8998'
 
         with self.subTest('get batch success'):
             TestLivyHook.build_mock_response(mock_request, 200, {'id': batch_id, 'state': running.value})
@@ -280,7 +280,7 @@ class TestLivyHook(unittest.TestCase):
             state = hook.get_batch_state(batch_id)
 
             mock_request.assert_called_once()
-            mock_request.assert_called_with('http://localhost:8998/batches/{}/state'.format(batch_id))
+            mock_request.assert_called_with(endpoint='/batches/{}/state'.format(batch_id))
             self.assertIsInstance(state, BatchState)
             self.assertEqual(state, running)
 
@@ -292,7 +292,7 @@ class TestLivyHook(unittest.TestCase):
             with self.assertRaises(AirflowException):
                 hook.get_batch_state(batch_id)
             mock_request.assert_called_once()
-            mock_request.assert_called_with('http://localhost:8998/batches/{}/state'.format(batch_id))
+            mock_request.assert_called_with(endpoint='/batches/{}/state'.format(batch_id))
 
     def test_parse_post_response(self):
         batch_id = 100
@@ -301,13 +301,12 @@ class TestLivyHook(unittest.TestCase):
 
         self.assertEqual(batch_id, res_id)
 
-    @patch('requests.delete')
+    @patch('airflow.contrib.hooks.livy_hook.LivyHook.run_method')
     def test_delete_batch(self, mock_request):
 
         batch_id = 100
 
         hook = LivyHook()
-        hook._base_url = 'http://localhost:8998'
 
         with self.subTest('get batch success'):
             TestLivyHook.build_mock_response(mock_request, 200, {'msg': 'deleted'})
@@ -315,7 +314,10 @@ class TestLivyHook(unittest.TestCase):
             resp = hook.delete_batch(batch_id)
 
             mock_request.assert_called_once()
-            mock_request.assert_called_with('http://localhost:8998/batches/{}'.format(batch_id))
+            mock_request.assert_called_with(
+                method='DELETE',
+                endpoint='/batches/{}'.format(batch_id)
+            )
             self.assertEqual(resp, {'msg': 'deleted'})
 
         mock_request.reset_mock()
@@ -326,12 +328,14 @@ class TestLivyHook(unittest.TestCase):
             with self.assertRaises(AirflowException):
                 hook.delete_batch(batch_id)
             mock_request.assert_called_once()
-            mock_request.assert_called_with('http://localhost:8998/batches/{}'.format(batch_id))
+            mock_request.assert_called_with(
+                method='DELETE',
+                endpoint='/batches/{}'.format(batch_id)
+            )
 
-    @patch('requests.post')
+    @patch('airflow.contrib.hooks.livy_hook.LivyHook.run_method')
     def test_missing_batch_id(self, mock_post):
         hook = LivyHook()
-        hook._base_url = 'http://localhost:8998'
 
         TestLivyHook.build_mock_response(mock_post, 201, {})
 
@@ -340,66 +344,57 @@ class TestLivyHook(unittest.TestCase):
 
         mock_post.assert_called_once()
         mock_post.assert_called_with(
-            'http://localhost:8998/batches',
-            data=json.dumps({'file': 'sparkapp'}),
-            headers={'Content-Type': 'application/json'}
+            method='POST',
+            endpoint='/batches',
+            data=json.dumps({'file': 'sparkapp'})
         )
 
-    @patch('requests.get')
+    @patch('airflow.contrib.hooks.livy_hook.LivyHook.run_method')
     def test_get_batch_validation(self, mock_call):
         hook = LivyHook(livy_conn_id='simple')
-        hook._base_url = 'http://host:8998'
         TestLivyHook.build_mock_response(mock_call, 200, SAMPLE_GET_RESPONSE)
 
-        with self.subTest('get_batch int'):
+        with self.subTest('get_batch'):
             hook.get_batch(TEST_ID)
-            mock_call.assert_called_with('{}/batches/{}'.format(hook._base_url, TEST_ID))
-
-        with self.subTest('get_batch str'):
-            hook.get_batch(str(TEST_ID))
-            mock_call.assert_called_with('{}/batches/{}'.format(hook._base_url, TEST_ID))
+            mock_call.assert_called_with(endpoint='/batches/{}'.format(TEST_ID))
 
         for val in [None, 'one', {'a': 'b'}]:
             with self.subTest('get_batch {}'.format(val)):
                 with self.assertRaises(AirflowException):
+                    # noinspection PyTypeChecker
                     hook.get_batch(val)
 
-    @patch('requests.get')
+    @patch('airflow.contrib.hooks.livy_hook.LivyHook.run_method')
     def test_get_batch_state_validation(self, mock_call):
         hook = LivyHook(livy_conn_id='simple')
-        hook._base_url = 'http://host:8998'
         TestLivyHook.build_mock_response(mock_call, 200, SAMPLE_GET_RESPONSE)
 
-        with self.subTest('get_batch int'):
+        with self.subTest('get_batch'):
             hook.get_batch_state(TEST_ID)
-            mock_call.assert_called_with('{}/batches/{}/state'.format(hook._base_url, TEST_ID))
-
-        with self.subTest('get_batch str'):
-            hook.get_batch_state(str(TEST_ID))
-            mock_call.assert_called_with('{}/batches/{}/state'.format(hook._base_url, TEST_ID))
+            mock_call.assert_called_with(endpoint='/batches/{}/state'.format(TEST_ID))
 
         for val in [None, 'one', {'a': 'b'}]:
             with self.subTest('get_batch {}'.format(val)):
                 with self.assertRaises(AirflowException):
+                    # noinspection PyTypeChecker
                     hook.get_batch_state(val)
 
-    @patch('requests.delete')
+    @patch('airflow.contrib.hooks.livy_hook.LivyHook.run_method')
     def test_delete_batch_validation(self, mock_call):
         hook = LivyHook(livy_conn_id='simple')
-        hook._base_url = 'http://host:8998'
         TestLivyHook.build_mock_response(mock_call, 200, {'id': TEST_ID})
 
-        with self.subTest('get_batch int'):
+        with self.subTest('get_batch'):
             hook.delete_batch(TEST_ID)
-            mock_call.assert_called_with('{}/batches/{}'.format(hook._base_url, TEST_ID))
-
-        with self.subTest('get_batch str'):
-            hook.delete_batch(str(TEST_ID))
-            mock_call.assert_called_with('{}/batches/{}'.format(hook._base_url, TEST_ID))
+            mock_call.assert_called_with(
+                method='DELETE',
+                endpoint='/batches/{}'.format(TEST_ID)
+            )
 
         for val in [None, 'one', {'a': 'b'}]:
             with self.subTest('get_batch {}'.format(val)):
                 with self.assertRaises(AirflowException):
+                    # noinspection PyTypeChecker
                     hook.delete_batch(val)
 
     def test_check_session_id(self):

@@ -21,7 +21,7 @@
 This module contains the Apache Livy sensor.
 """
 
-from airflow.contrib.hooks.livy_hook import LivyHook, TERMINAL_STATES
+from airflow.contrib.hooks.livy_hook import LivyHook
 from airflow.sensors.base_sensor_operator import BaseSensorOperator
 from airflow.utils.decorators import apply_defaults
 
@@ -58,4 +58,4 @@ class LivySensor(BaseSensorOperator):
         batch_id = self._batch_id
 
         status = self._livy_hook.get_batch_state(batch_id)
-        return status in TERMINAL_STATES
+        return status in self._livy_hook.TERMINAL_STATES
