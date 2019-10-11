@@ -24,7 +24,6 @@ using the Java and Python executables provided in the example library.
 """
 
 import airflow
-
 from airflow import DAG
 from airflow.contrib.operators.livy_operator import LivyOperator
 

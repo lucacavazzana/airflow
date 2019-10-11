@@ -85,7 +85,7 @@ class LivyHook(HttpHook, LoggingMixin):
         tmp_headers = self._def_headers.copy()  # setting default headers
         if headers:
             tmp_headers.update(headers)
-        return super(LivyHook, self).get_conn(tmp_headers)
+        return super().get_conn(tmp_headers)
 
     def run_method(self, method='GET', endpoint=None, data=None, headers=None, extra_options=None):
         """
